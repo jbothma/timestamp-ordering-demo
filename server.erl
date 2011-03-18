@@ -23,37 +23,41 @@ initialize() ->
     Initialvals = [{a,0},{b,0},{c,0},{d,0}], %% All variables are set to 0
     ServerPid = self(),
     StorePid = spawn_link(fun() -> store_loop(ServerPid,Initialvals) end),
-    server_loop([],StorePid).
+    server_loop([], StorePid, 0).           %% initial TrnCnt is 0
 %%%%%%%%%%%%%%%%%%%%%%% STARTING SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% - The server maintains a list of all connected clients and a store holding
 %% the values of the global variable a, b, c and d 
-server_loop(ClientList,StorePid) ->
+%% TrnCnt is Transaction Count - next new transaction TS will be TrnCnt + 1
+server_loop(ClientList, StorePid, TrnCnt) ->
     receive
 	{login, MM, Client} -> 
 	    MM ! {ok, self()},
 	    io:format("New client has joined the server:~p.~n", [Client]),
 	    StorePid ! {print, self()},
-	    server_loop(add_client(Client,ClientList),StorePid);
+	    server_loop(add_client(Client,ClientList), StorePid, TrnCnt);
 	{close, Client} -> 
-	    io:format("Client~p has left the server.~n", [Client]),
+	    io:format("Client ~p has left the server.~n", [Client]),
 	    StorePid ! {print, self()},
-	    server_loop(remove_client(Client,ClientList),StorePid);
+	    server_loop(remove_client(Client,ClientList), StorePid, TrnCnt);
 	{request, Client} -> 
 	    Client ! {proceed, self()},
-	    server_loop(ClientList,StorePid);
+        NewTrnCnt = TrnCnt + 1,
+        io:format("request from ~p, starting transaction ~p~n", [Client, NewTrnCnt]),
+	    server_loop(ClientList, StorePid, NewTrnCnt);
 	{confirm, Client} -> 
+        io:format("confirm from ~p~n", [Client]),
 	    Client ! {abort, self()},
-	    server_loop(ClientList,StorePid);
+	    server_loop(ClientList, StorePid, TrnCnt);
 	{action, Client, Act} ->
-	    io:format("Received~p from client~p.~n", [Act, Client]),
-	    server_loop(ClientList,StorePid)
+	    io:format("Received ~p from client ~p.~n", [Act, Client]),
+	    server_loop(ClientList, StorePid, TrnCnt)
     after 50000 ->
 	case all_gone(ClientList) of
 	    true -> exit(normal);    
-	    false -> server_loop(ClientList,StorePid)
+	    false -> server_loop(ClientList, StorePid, TrnCnt)
 	end
     end.
 
