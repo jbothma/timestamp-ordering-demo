@@ -49,7 +49,6 @@ server_loop(ClientList,StorePid) ->
 	    server_loop(ClientList,StorePid);
 	{action, Client, Act} ->
 	    io:format("Received~p from client~p.~n", [Act, Client]),
-    	StorePid ! {act, Act, self()},
 	    server_loop(ClientList,StorePid)
     after 50000 ->
 	case all_gone(ClientList) of
@@ -62,22 +61,6 @@ server_loop(ClientList,StorePid) ->
 store_loop(ServerPid, Database) -> 
     receive
 	{print, ServerPid} -> 
-	    io:format("Database status:~n~p.~n",[Database]),
-	    store_loop(ServerPid,Database);
-	{act, Act, ServerPid} -> 
-        Op  = element(1, Act),
-        Key = element(2, Act),
-        case Op of
-            'read' ->
-                OldVal = element(2, lists:keyfind(Key, 1, Database)),
-                io:format("Read ~p as ~p~n", [Key, OldVal]);
-            'write' ->
-                NewVal = element(3, Act),
-                NewDatabase = lists:keyreplace(Key, 1, Database, {Key, NewVal}),
-                io:format("Write ~p as ~p~n", [Key, NewVal]),
-        	    io:format("Database status:~n~p.~n",[NewDatabase]),
-        	    store_loop(ServerPid,NewDatabase)
-        end,
 	    io:format("Database status:~n~p.~n",[Database]),
 	    store_loop(ServerPid,Database)
     end.
