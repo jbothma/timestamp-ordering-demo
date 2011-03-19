@@ -32,6 +32,7 @@ initialize() ->
 %% the values of the global variable a, b, c and d 
 %% TrnCnt is Transaction Count - next new transaction TS will be TrnCnt + 1
 server_loop(ClientList, StorePid, TrnCnt) ->
+    io:format("ClientList: ~p~n", [ClientList]),
     receive
 	{login, MM, Client} -> 
 	    MM ! {ok, self()},
@@ -73,12 +74,17 @@ store_loop(ServerPid, Database) ->
 
 
 %% - Low level function to handle lists
-add_client(C,T) -> [C|T].
+add_client(C,ClientList) -> [new_client(C)|ClientList].
 
+new_client(C) -> [C, nil, [],[]].
+
+% remove anything form empty list returns empty list
 remove_client(_,[]) -> [];
-remove_client(C, [C|T]) -> T;
+% if client is first, return rest
+remove_client(C, [ [C|_] | T ]) -> T;
+% falling through when client wasn't first, 
+% recurse down and return first and rest with client removed from in-between
 remove_client(C, [H|T]) -> [H|remove_client(C,T)].
 
 all_gone([]) -> true;
 all_gone(_) -> false.
-    
