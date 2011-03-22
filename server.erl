@@ -66,8 +66,11 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
         StorePid ! {Act, TS, self()},
         receive
             {depend, WTS} ->  % do DEP(T_i).add(WTS(O_j))
-                io:format("Server: Read succeeded~n"),
+                io:format("Server: Read allowed~n"),
                 NewClientList = add_to_DEP(ClientList, TS, WTS);
+            {old, OldObject} ->  % Let server do OLD(T_i).add( O_j, WTS(O_j) )                
+                io:format("Server: Write allowed~n"),
+                NewClientList = add_to_Old(ClientList, TS, OldObject);
             {abort, TS} ->
                 io:format("Server: DB said abort trn ~p~n", [TS]),
                 NewClientList = ClientList
@@ -107,8 +110,21 @@ store_loop(ServerPid, Database) ->
 	    store_loop(ServerPid,Database);
     {{write, Idx, Val}, TS, ServerPid} ->
         io:format("DB: Must write val ~p to idx ~p for trn ~p~n", [Val, Idx, TS]),
+        WTS = get_WTS(Database, Idx),
+        RTS = get_RTS(Database, Idx),
+        if
+            (WTS > TS) or (RTS > TS) ->
+                ServerPid ! {abort, TS},
+                NewDatabase = Database;
+            true ->
+                OldObject = lists:keyfind(Idx, 1, Database),
+                ServerPid ! {old, OldObject},  % Let server do OLD(T_i).add( O_j, WTS(O_j) )
+                %set WTS(O_j) = TS(T_i)
+                %do write
+                NewDatabase = do_write(Database, Idx, Val, TS)
+        end,
 	    io:format("Database status:~n~p.~n",[Database]),
-	    store_loop(ServerPid,Database);
+	    store_loop(ServerPid,NewDatabase);
     {{read, Idx}, TS, ServerPid} ->
         io:format("DB: Must read idx ~p for trn ~p~n", [Idx, TS]),
         WTS = get_WTS(Database, Idx),
@@ -153,9 +169,9 @@ do_commit_loop(TS, DEP, TrnHist, ServerPid) ->
 get_WTS(DB, Idx) ->
     element(4, lists:keyfind(Idx, 1, DB)).
 
-set_WTS(DB, Idx, NewWTS) ->
-    {_, Val, RTS, _} = lists:keyfind(Idx, 1, DB),
-    lists:keyreplace(Idx, 1, DB, {Idx, Val, RTS, NewWTS}).
+%set_WTS(DB, Idx, NewWTS) ->
+%    {_, Val, RTS, _} = lists:keyfind(Idx, 1, DB),
+%    lists:keyreplace(Idx, 1, DB, {Idx, Val, RTS, NewWTS}).
 
 get_RTS(DB, Idx) ->
     element(3, lists:keyfind(Idx, 1, DB)).
@@ -167,6 +183,13 @@ set_RTS(DB, Idx, NewRTS) ->
 add_to_DEP(ClientList, TS, DependOnTS) ->
     {Client, _, DEP, OLD} = lists:keyfind(TS, 2, ClientList),
     lists:keyreplace(TS, 2, ClientList, {Client, TS, sets:add_element(DependOnTS, DEP), OLD}).
+
+add_to_Old(ClientList, TS, OldObject) ->
+    {Client, _, DEP, OLD} = lists:keyfind(TS, 2, ClientList),
+    lists:keyreplace(TS, 2, ClientList, {Client, TS, DEP, [OldObject|OLD]}).
+
+do_write(DB, Idx, Val, TS) ->
+    lists:keyreplace(Idx, 1, DB, {Idx, Val, get_RTS(DB, Idx), TS}).
 
 % send all Checking transactions a "someone_completed" with updated transaction history
 announce_completion(Checking) ->
@@ -201,8 +224,7 @@ start_transaction(TrnCnt, ClientList, Client) ->
     {NewTrnCnt, lists:keyreplace(Client, 1, ClientList, {Client, NewTrnCnt, DEP, OLD})}.
 
 end_transaction(ClientList, Client) ->
-    {_, _, _, OLD}    = lists:keyfind(Client, 1, ClientList),
-    lists:keyreplace(Client, 1, ClientList, {Client, nil, sets:new(), OLD}).
+    lists:keyreplace(Client, 1, ClientList, {Client, nil, sets:new(), []}).
 
 get_transaction(ClientList, Client) -> 
     TS = element(2, lists:keyfind(Client, 1, ClientList)),
