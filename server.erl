@@ -20,7 +20,7 @@ start() ->
 
 initialize() ->
     process_flag(trap_exit, true),
-    Initialvals = [{a,0},{b,0},{c,0},{d,0}], %% All variables are set to 0
+    Initialvals = [{a,0,0,0},{b,0,0,0},{c,0,0,0},{d,0,0,0}], %% All variables are set to 0
     ServerPid = self(),
     StorePid = spawn_link(fun() -> store_loop(ServerPid,Initialvals) end),
     server_loop([], StorePid, 0).           %% initial TrnCnt is 0
@@ -81,14 +81,14 @@ start_transaction(TrnCnt, ClientList, Client) ->
     [_, _, DEP, OLD]    = find_client(Client, ClientList),
     TempClientList      = remove_client(Client, ClientList),
     NewClientData       = [Client, NewTrnCnt, DEP, OLD],
-    NewClientList       = TempClientList ++ [NewClientData], % add updated client data to client list
+    NewClientList       = [NewClientData|TempClientList],
     {NewTrnCnt, NewClientList}.
 
 end_transaction(ClientList, Client) ->
     [_, _, DEP, OLD]    = find_client(Client, ClientList),
     TempClientList      = remove_client(Client, ClientList),
     NewClientData       = [Client, nil, DEP, OLD],
-    TempClientList ++ [NewClientData]. % add updated client data to client list
+    [NewClientData|TempClientList].
 
 %% - Low level function to handle lists
 add_client(C,ClientList) -> [new_client(C)|ClientList].
