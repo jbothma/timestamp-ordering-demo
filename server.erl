@@ -67,33 +67,22 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
     {abort, TS, ChkPid} ->
         io:format("Server: check said ABORT~n"),
         %set status in history to aborted
-        NewTrnHist = lists:keyreplace(TS, 1, TrnHist, {TS, aborted}),
+        NewTrnHist  = lists:keyreplace(TS, 1, TrnHist, {TS, aborted}),
         NewChecking = Checking--[ChkPid],
-        %send client abort
-        Client = lists:keyfind(TS, 2, ClientList),
-	    Client ! {abort, self()},
-        % send all Checking transactions a "someone_completed" with updated transaction history
-        lists:map(fun(CheckingPid) -> CheckingPid ! someone_committed end, Checking),
-        % transaction has ended
+        Client      = element(1, lists:keyfind(TS, 2, ClientList)),
         NewClientList = end_transaction(ClientList, Client),
+	    Client ! {abort, self()},
+        announce_completion(Checking),
         server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking);
     {commit, TS, ChkPid} ->
-        io:format("Server: check said COMMIT~n"),
         % set status in history to committed
-        NewTrnHist = lists:keyreplace(TS, 1, TrnHist, {TS, committed}),
+        NewTrnHist  = lists:keyreplace(TS, 1, TrnHist, {TS, committed}),
         NewChecking = Checking--[ChkPid],
-        % send client commit
-        {Client, _, _, _} = lists:keyfind(TS, 2, ClientList),
-        io:format("here2 ~p~n", [Client]),
-	    Client ! {committed, self()},
-        io:format("here ~p~n", [Client]),
-        % send all Checking transactions a "someone_completed" with updated transaction history
-        lists:map(fun(CheckingPid) -> CheckingPid ! someone_committed end, Checking),
-        % transaction has ended
+        Client      = element(1, lists:keyfind(TS, 2, ClientList)),
         NewClientList = end_transaction(ClientList, Client),
-        server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking);
-    Other ->
-        io:format("Server: unexpected message ~p~n", [Other])
+	    Client ! {committed, self()},
+        announce_completion(Checking),
+        server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
     after 50000 ->
 	case all_gone(ClientList) of
 	    true -> exit(normal);    
@@ -115,7 +104,7 @@ store_loop(ServerPid, Database) ->
 % time a running transaction is encountered in DEP.
 % restart loop with up-to-date history upon 'someone_completed'
 do_commit_loop(TS, DEP, TrnHist, ServerPid) ->    
-    io:format("Server is ~p. checking trn ~p: DEP=~p   TrnHist=~p~n", [ServerPid, TS, DEP, TrnHist]),
+    %io:format("checking trn ~p: DEP=~p   TrnHist=~p~n", [TS, DEP, TrnHist]),
     CommitCheck = check_history(TrnHist, DEP),
     case CommitCheck of
         wait ->
@@ -125,14 +114,19 @@ do_commit_loop(TS, DEP, TrnHist, ServerPid) ->
                 do_commit_loop(TS, DEP, NewTrnHist, ServerPid)
             end;
         abort ->
-            io:format("checking: abort~n"),
+            %io:format("checking: abort~n"),
             ServerPid ! {abort, TS, self()};
         commit ->
-            io:format("checking: commit~n"),
+            %io:format("checking: commit~n"),
             ServerPid ! {commit, TS, self()}
     end.
 
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+% send all Checking transactions a "someone_completed" with updated transaction history
+announce_completion(Checking) ->
+    lists:map(fun(CheckingPid) -> CheckingPid ! someone_committed end, Checking).
 
 %check_history(History, DEP) -> commit or abort or wait
 check_history([], _) -> io:format("our_error_empty_history~n");
