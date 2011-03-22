@@ -56,7 +56,7 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
 	{confirm, Client} -> 
         ServerPid = self(),
         io:format("confirm from ~p~n", [Client]),
-        [_, TS, DEP, _] = find_client(Client, ClientList),
+        {_, TS, DEP, _} = lists:keyfind(Client, 1, ClientList),
         CheckingPid = spawn(fun() -> do_commit_loop(TS, DEP, TrnHist, ServerPid) end),
         NewChecking = [CheckingPid|Checking],
 	    server_loop(ClientList, StorePid, TrnCnt, TrnHist, NewChecking);
@@ -82,12 +82,11 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
         % set status in history to committed
         NewTrnHist = lists:keyreplace(TS, 1, TrnHist, {TS, committed}),
         NewChecking = Checking--[ChkPid],
-        io:format("here1~n"),
         % send client commit
-        Client = lists:keyfind(TS, 2, ClientList),
-        io:format("here3 ~p  ~p  ~p~n", [Client, ClientList, TS]),
+        {Client, _, _, _} = lists:keyfind(TS, 2, ClientList),
+        io:format("here2 ~p~n", [Client]),
 	    Client ! {committed, self()},
-        io:format("here2~n"),
+        io:format("here ~p~n", [Client]),
         % send all Checking transactions a "someone_completed" with updated transaction history
         lists:map(fun(CheckingPid) -> CheckingPid ! someone_committed end, Checking),
         % transaction has ended
@@ -160,34 +159,25 @@ handle_action({read, Idx}, Client) ->
 % !!!NOTE!!! it assumes each client only ever attempts one transaction at a time!
 start_transaction(TrnCnt, ClientList, Client) ->
     NewTrnCnt           = TrnCnt + 1,
-    [_, _, DEP, OLD]    = find_client(Client, ClientList),
-    TempClientList      = remove_client(Client, ClientList),
-    NewClientData       = [Client, NewTrnCnt, DEP, OLD],
-    NewClientList       = [NewClientData|TempClientList],
-    {NewTrnCnt, NewClientList}.
+    {_, _, DEP, OLD}    = lists:keyfind(Client, 1, ClientList),
+    {NewTrnCnt, lists:keyreplace(Client, 1, ClientList, {Client, NewTrnCnt, DEP, OLD})}.
 
 end_transaction(ClientList, Client) ->
-    [_, _, DEP, OLD]    = find_client(Client, ClientList),
-    TempClientList      = remove_client(Client, ClientList),
-    NewClientData       = [Client, nil, DEP, OLD],
-    [NewClientData|TempClientList].
+    {_, _, DEP, OLD}    = lists:keyfind(Client, 1, ClientList),
+    lists:keyreplace(Client, 1, ClientList, {Client, nil, DEP, OLD}).
 
 %% - Low level function to handle lists
 add_client(C,ClientList) -> [new_client(C)|ClientList].
 
-new_client(C) -> [C, nil, [],[]].
+new_client(C) -> {C, nil, [],[]}.
 
 % remove anything from empty list returns empty list
 remove_client(_,[]) -> [];
 % if client is first, return rest
-remove_client(C, [ [C|_] | T ]) -> T;
+remove_client(C, [ {C,_,_,_} | T ]) -> T;
 % falling through when client wasn't first, 
 % recurse down and return first and rest with client removed from in-between
 remove_client(C, [H|T]) -> [H|remove_client(C,T)].
-
-find_client(C, [ [C,TS,DEP,OLD] ]) -> [C,TS,DEP,OLD];
-find_client(C, [ [C,TS,DEP,OLD] | _ ]) -> [C,TS,DEP,OLD];
-find_client(C, [_|T]) -> find_client(C,T).
 
 all_gone([]) -> true;
 all_gone(_) -> false.
