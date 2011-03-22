@@ -109,7 +109,7 @@ store_loop(ServerPid, Database) ->
 % restart loop with up-to-date history upon 'someone_completed'
 do_commit_loop(TS, DEP, TrnHist, ServerPid) ->    
     io:format("checking: DEP=~p   TrnHist=~p~n", [DEP, TrnHist]),
-    CommitCheck = check_history(DEP, TrnHist),
+    CommitCheck = check_history(TrnHist, DEP),
     io:format("here~n"),
     case CommitCheck of
         wait ->
@@ -129,8 +129,8 @@ do_commit_loop(TS, DEP, TrnHist, ServerPid) ->
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %check_history(History, DEP) -> commit or abort or wait
+check_history([], _) -> io:format("our_error_empty_history~n");
 check_history(_, []) -> commit;
-check_history([], _) -> exit(our_error_empty_history);
 check_history(History, [TS|Rest]) ->
     {_, Status} = lists:keyfind(TS, 1, History),
     case Status of 
