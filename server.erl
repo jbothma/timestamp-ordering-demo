@@ -21,10 +21,12 @@ start() ->
 initialize() ->
     process_flag(trap_exit, true),
     Initialvals = [{a,0,0,0},{b,0,0,0},{c,0,0,0},{d,0,0,0}], %% All variables are set to 0
-    InitialTrnHist = [],
     ServerPid = self(),
     StorePid = spawn_link(fun() -> store_loop(ServerPid,Initialvals) end),
-    server_loop([], StorePid, 0, InitialTrnHist).           %% initial TrnCnt is 0
+    % initial TrnCnt is 0
+    % initial TrnHist is []
+    % initial Checking is []
+    server_loop([], StorePid, 0, [], []).
 %%%%%%%%%%%%%%%%%%%%%%% STARTING SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -32,8 +34,8 @@ initialize() ->
 %% - The server maintains a list of all connected clients and a store holding
 %% the values of the global variable a, b, c and d 
 %% TrnCnt is Transaction Count, incremented in start_transaction
-server_loop(ClientList, StorePid, TrnCnt) ->
-    io:format("ClientList: ~p~n", [ClientList]),
+server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
+    %io:format("ClientList: ~p~n", [ClientList]),
     receive
 	{login, MM, Client} -> 
 	    MM ! {ok, self()},
@@ -48,19 +50,42 @@ server_loop(ClientList, StorePid, TrnCnt) ->
 	    Client ! {proceed, self()},
         io:format("request from ~p, starting new transaction.~n", [Client]),
         {NewTrnCnt, NewClientList} = start_transaction(TrnCnt, ClientList, Client),
+        NewTrnHist = [{NewTrnCnt, running}|TrnHist],
         io:format("New transaction count stands at ~p~n", [NewTrnCnt]),
-	    server_loop(NewClientList, StorePid, NewTrnCnt);
+	    server_loop(NewClientList, StorePid, NewTrnCnt, NewTrnHist, Checking);
 	{confirm, Client} -> 
         io:format("confirm from ~p~n", [Client]),
-        % send all waiting transactions a "someone_committed" with updated transaction history
-	    Client ! {abort, self()},
-        NewClientList = end_transaction(ClientList, Client),
-	    server_loop(NewClientList, StorePid, TrnCnt);
+        CheckingPid = spawn(do_commit_loop, [TS, DEP, TrnHist, self()]),
+        NewChecking = [CheckingPid|Checking],
+	    server_loop(ClientList, StorePid, TrnCnt, TrnHist, NewChecking);
 	{action, Client, Act} ->
 	    io:format("Received ~p from client ~p.~n", [Act, Client]),
         handle_action(Act, Client),
-	    server_loop(ClientList, StorePid, TrnCnt)
-    {abort, TS
+	    server_loop(ClientList, StorePid, TrnCnt);
+    {abort, TS, ChkPid} ->
+        %set status in history to aborted
+        NewTrnHist = lists:keyreplace(TS, 1, TrnHist, {TS, aborted}),
+        NewChecking = Checking--[ChkPid],
+        %send client abort
+        Client = lists:keyfind(TS, 2, ClientList),
+	    Client ! {abort, self()},
+        % send all Checking transactions a "someone_completed" with updated transaction history
+        map(fun(CheckingPid) -> CheckingPid ! someone_committed end, Checking),
+        % transaction has ended
+        NewClientList = end_transaction(ClientList, Client),
+        server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
+    {commit, TS, ChkPid} ->
+        % set status in history to committed
+        NewTrnHist = lists:keyreplace(TS, 1, TrnHist, {TS, committed}),
+        NewChecking = Checking--[ChkPid],
+        % send client commit
+        Client = lists:keyfind(TS, 2, ClientList),
+	    Client ! {committed, self()},
+        % send all Checking transactions a "someone_completed" with updated transaction history
+        map(fun(CheckingPid) -> CheckingPid ! someone_committed end, Checking),
+        % transaction has ended
+        NewClientList = end_transaction(ClientList, Client),
+        server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
     after 50000 ->
 	case all_gone(ClientList) of
 	    true -> exit(normal);    
@@ -76,13 +101,18 @@ store_loop(ServerPid, Database) ->
 	    store_loop(ServerPid,Database)
     end.
 
+% spawned as separate process from server_loop.
+% each loop, check status of each transaction DEP.
+% Wait for a 'someone_completed' from server_loop each 
+% time a running transaction is encountered in DEP.
+% restart loop with up-to-date history upon 'someone_completed'
 do_commit_loop(TS, DEP, TransactionHistory, ServerPid) ->
     CommitCheck = check_history(DEP, TransactionHistory),
     case CommitCheck of
         wait ->
             receive 
-            {someone_committed, NewTransactionHistory} ->
-                do_commit(TS, DEP, NewTransactionHistory)
+            {someone_completed, NewTransactionHistory} ->
+                do_commit_loop(TS, DEP, NewTransactionHistory)
             end
         abort ->
             ServerPid ! {abort, TS, self()}
