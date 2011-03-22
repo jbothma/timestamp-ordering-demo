@@ -21,9 +21,10 @@ start() ->
 initialize() ->
     process_flag(trap_exit, true),
     Initialvals = [{a,0,0,0},{b,0,0,0},{c,0,0,0},{d,0,0,0}], %% All variables are set to 0
+    InitialTrnHist = [],
     ServerPid = self(),
     StorePid = spawn_link(fun() -> store_loop(ServerPid,Initialvals) end),
-    server_loop([], StorePid, 0).           %% initial TrnCnt is 0
+    server_loop([], StorePid, 0, InitialTrnHist).           %% initial TrnCnt is 0
 %%%%%%%%%%%%%%%%%%%%%%% STARTING SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -51,6 +52,7 @@ server_loop(ClientList, StorePid, TrnCnt) ->
 	    server_loop(NewClientList, StorePid, NewTrnCnt);
 	{confirm, Client} -> 
         io:format("confirm from ~p~n", [Client]),
+        % send all waiting transactions a "someone_committed" with updated transaction history
 	    Client ! {abort, self()},
         NewClientList = end_transaction(ClientList, Client),
 	    server_loop(NewClientList, StorePid, TrnCnt);
@@ -58,6 +60,7 @@ server_loop(ClientList, StorePid, TrnCnt) ->
 	    io:format("Received ~p from client ~p.~n", [Act, Client]),
         handle_action(Act, Client),
 	    server_loop(ClientList, StorePid, TrnCnt)
+    {abort, TS
     after 50000 ->
 	case all_gone(ClientList) of
 	    true -> exit(normal);    
@@ -72,10 +75,44 @@ store_loop(ServerPid, Database) ->
 	    io:format("Database status:~n~p.~n",[Database]),
 	    store_loop(ServerPid,Database)
     end.
+
+do_commit_loop(TS, DEP, TransactionHistory, ServerPid) ->
+    CommitCheck = check_history(DEP, TransactionHistory),
+    case CommitCheck of
+        wait ->
+            receive 
+            {someone_committed, NewTransactionHistory} ->
+                do_commit(TS, DEP, NewTransactionHistory)
+            end
+        abort ->
+            ServerPid ! {abort, TS, self()}
+        commit ->
+            ServerPid ! {can_abort, Ts, self()}
+
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%check_history(History, DEP) -> commit or abort or wait
+check_history(_, []) -> commit;
+check_history([], _) -> exit(our_error_empty_history);
+check_history(History, [TS|Rest]) ->
+    {_, Status} = lists:keyfind(TS, 1, History),
+    case Status of 
+        aborted ->
+            abort;
+        running ->
+            wait;
+        committed ->
+            check_history(History, Rest)
+    end.
 
 handle_action({read, Idx}, Client) ->
     io:format("Must read idx ~p~n", [Idx]);
+    WTS = 
+    TS = 
+    if WTS > TS
+        abort
+    else
+        do 
 handle_action({write, Idx, Val}, Client) ->
     io:format("Must write val ~p to idx ~p~n", [Val, Idx]).
     
