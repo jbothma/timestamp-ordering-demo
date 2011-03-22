@@ -56,6 +56,7 @@ server_loop(ClientList, StorePid, TrnCnt) ->
 	    server_loop(NewClientList, StorePid, TrnCnt);
 	{action, Client, Act} ->
 	    io:format("Received ~p from client ~p.~n", [Act, Client]),
+        handle_action(Act, Client),
 	    server_loop(ClientList, StorePid, TrnCnt)
     after 50000 ->
 	case all_gone(ClientList) of
@@ -72,6 +73,12 @@ store_loop(ServerPid, Database) ->
 	    store_loop(ServerPid,Database)
     end.
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+handle_action({read, Idx}, Client) ->
+    io:format("Must read idx ~p~n", [Idx]);
+handle_action({write, Idx, Val}, Client) ->
+    io:format("Must write val ~p to idx ~p~n", [Val, Idx]).
+    
 
 % Return new client list where the client tuple has been replaced with
 % one where all values are the same except for the new transaction number.
