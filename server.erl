@@ -35,7 +35,7 @@ initialize() ->
 %% the values of the global variable a, b, c and d 
 %% TrnCnt is Transaction Count, incremented in start_transaction
 server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
-    %io:format("Server: I am ~p~n", [self()]),
+    %io:format("Server: ClientList=~p~n", [ClientList]),
     receive
 	{login, MM, Client} -> 
 	    MM ! {ok, self()},
@@ -106,20 +106,23 @@ store_loop(ServerPid, Database) ->
 	    io:format("Database status:~n~p.~n",[Database]),
 	    store_loop(ServerPid,Database);
     {{write, Idx, Val}, TS, ServerPid} ->
-        io:format("Must write val ~p to idx ~p for trn ~p~n", [Val, Idx, TS]),
+        io:format("DB: Must write val ~p to idx ~p for trn ~p~n", [Val, Idx, TS]),
+	    io:format("Database status:~n~p.~n",[Database]),
 	    store_loop(ServerPid,Database);
     {{read, Idx}, TS, ServerPid} ->
-        io:format("Must read idx ~p for trn ~p~n", [Idx, TS]),
+        io:format("DB: Must read idx ~p for trn ~p~n", [Idx, TS]),
         WTS = get_WTS(Database, Idx),
         if
             WTS > TS ->
-                ServerPid ! {abort, TS};
+                ServerPid ! {abort, TS},
+                NewDatabase = Database;
             true ->                 
                 ServerPid ! {depend, WTS},     % Let server do DEP(T_i).add(WTS(O_j))
                 RTS = get_RTS(Database, Idx),
-                set_RTS(Database, Idx, erlang:max(RTS, TS))
+                NewDatabase = set_RTS(Database, Idx, erlang:max(RTS, TS))
         end,
-	    store_loop(ServerPid,Database)
+	    io:format("Database status:~n~p.~n",[NewDatabase]),
+	    store_loop(ServerPid, NewDatabase)
     end.
 
 % spawned as separate process from server_loop.
@@ -198,8 +201,8 @@ start_transaction(TrnCnt, ClientList, Client) ->
     {NewTrnCnt, lists:keyreplace(Client, 1, ClientList, {Client, NewTrnCnt, DEP, OLD})}.
 
 end_transaction(ClientList, Client) ->
-    {_, _, DEP, OLD}    = lists:keyfind(Client, 1, ClientList),
-    lists:keyreplace(Client, 1, ClientList, {Client, nil, DEP, OLD}).
+    {_, _, _, OLD}    = lists:keyfind(Client, 1, ClientList),
+    lists:keyreplace(Client, 1, ClientList, {Client, nil, sets:new(), OLD}).
 
 get_transaction(ClientList, Client) -> 
     TS = element(2, lists:keyfind(Client, 1, ClientList)),
