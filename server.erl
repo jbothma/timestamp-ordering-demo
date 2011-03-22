@@ -24,9 +24,9 @@ initialize() ->
     ServerPid = self(),
     StorePid = spawn_link(fun() -> store_loop(ServerPid,Initialvals) end),
     % initial TrnCnt is 0
-    % initial TrnHist is []
+    TrnHist = [{0, committed}], % hack for initial RTS and WTS
     % initial Checking is []
-    server_loop([], StorePid, 0, [], []).
+    server_loop([], StorePid, 0, TrnHist, []).
 %%%%%%%%%%%%%%%%%%%%%%% STARTING SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -61,9 +61,18 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
         NewChecking = [CheckingPid|Checking],
 	    server_loop(ClientList, StorePid, TrnCnt, TrnHist, NewChecking);
 	{action, Client, Act} ->
-	    io:format("Received ~p from client ~p.~n", [Act, Client]),
-        handle_action(Act, Client),
-	    server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking);
+	    %io:format("Received ~p from client ~p.~n", [Act, Client]),
+        TS = get_transaction(ClientList, Client),
+        StorePid ! {Act, TS, self()},
+        receive
+            {depend, WTS} ->  % do DEP(T_i).add(WTS(O_j))
+                io:format("Server: Read succeeded~n"),
+                NewClientList = add_to_DEP(ClientList, TS, WTS);
+            {abort, TS} ->
+                io:format("Server: DB said abort trn ~p~n", [TS]),
+                NewClientList = ClientList
+        end,
+	    server_loop(NewClientList, StorePid, TrnCnt, TrnHist, Checking);
     {abort, TS, ChkPid} ->
         io:format("Server: check said ABORT~n"),
         %set status in history to aborted
@@ -95,6 +104,21 @@ store_loop(ServerPid, Database) ->
     receive
 	{print, ServerPid} -> 
 	    io:format("Database status:~n~p.~n",[Database]),
+	    store_loop(ServerPid,Database);
+    {{write, Idx, Val}, TS, ServerPid} ->
+        io:format("Must write val ~p to idx ~p for trn ~p~n", [Val, Idx, TS]),
+	    store_loop(ServerPid,Database);
+    {{read, Idx}, TS, ServerPid} ->
+        io:format("Must read idx ~p for trn ~p~n", [Idx, TS]),
+        WTS = get_WTS(Database, Idx),
+        if
+            WTS > TS ->
+                ServerPid ! {abort, TS};
+            true ->                 
+                ServerPid ! {depend, WTS},     % Let server do DEP(T_i).add(WTS(O_j))
+                RTS = get_RTS(Database, Idx),
+                set_RTS(Database, Idx, erlang:max(RTS, TS))
+        end,
 	    store_loop(ServerPid,Database)
     end.
 
@@ -103,9 +127,9 @@ store_loop(ServerPid, Database) ->
 % Wait for a 'someone_completed' from server_loop each 
 % time a running transaction is encountered in DEP.
 % restart loop with up-to-date history upon 'someone_completed'
-do_commit_loop(TS, DEP, TrnHist, ServerPid) ->    
-    %io:format("checking trn ~p: DEP=~p   TrnHist=~p~n", [TS, DEP, TrnHist]),
-    CommitCheck = check_history(TrnHist, DEP),
+do_commit_loop(TS, DEP, TrnHist, ServerPid) ->
+    %io:format("checking trn ~p: DEP=~p   TrnHist=~p~n", [TS, sets:to_list(DEP), TrnHist]),
+    CommitCheck = check_history(TrnHist, sets:to_list(DEP)),
     case CommitCheck of
         wait ->
             io:format("checking: wait~n"),
@@ -123,6 +147,23 @@ do_commit_loop(TS, DEP, TrnHist, ServerPid) ->
 
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+get_WTS(DB, Idx) ->
+    element(4, lists:keyfind(Idx, 1, DB)).
+
+set_WTS(DB, Idx, NewWTS) ->
+    {_, Val, RTS, _} = lists:keyfind(Idx, 1, DB),
+    lists:keyreplace(Idx, 1, DB, {Idx, Val, RTS, NewWTS}).
+
+get_RTS(DB, Idx) ->
+    element(3, lists:keyfind(Idx, 1, DB)).
+
+set_RTS(DB, Idx, NewRTS) ->
+    {_, Val, _, WTS} = lists:keyfind(Idx, 1, DB),
+    lists:keyreplace(Idx, 1, DB, {Idx, Val, NewRTS, WTS}).
+
+add_to_DEP(ClientList, TS, DependOnTS) ->
+    {Client, _, DEP, OLD} = lists:keyfind(TS, 2, ClientList),
+    lists:keyreplace(TS, 2, ClientList, {Client, TS, sets:add_element(DependOnTS, DEP), OLD}).
 
 % send all Checking transactions a "someone_completed" with updated transaction history
 announce_completion(Checking) ->
@@ -142,10 +183,10 @@ check_history(History, [TS|Rest]) ->
             check_history(History, Rest)
     end.
 
-handle_action({write, Idx, Val}, Client) ->
-    io:format("Must write val ~p to idx ~p for client ~p~n", [Val, Idx, Client]);
-handle_action({read, Idx}, Client) ->
-    io:format("Must read idx ~p for client ~p~n", [Idx, Client]).
+%handle_action({write, Idx, Val}, TS) ->
+%    io:format("Must write val ~p to idx ~p for client ~p~n", [Val, Idx, TS]);
+%handle_action({read, Idx}, TS) ->
+%    io:format("Must read idx ~p for client ~p~n", [Idx, TS]).
     
 
 % Return new client list where the client tuple has been replaced with
@@ -160,10 +201,17 @@ end_transaction(ClientList, Client) ->
     {_, _, DEP, OLD}    = lists:keyfind(Client, 1, ClientList),
     lists:keyreplace(Client, 1, ClientList, {Client, nil, DEP, OLD}).
 
+get_transaction(ClientList, Client) -> 
+    TS = element(2, lists:keyfind(Client, 1, ClientList)),
+    case TS of
+        TS when is_integer(TS)  -> TS;
+        _Else                   -> io:format("no TS for client ~p in ~p~n", [Client,ClientList])
+    end.
+
 %% - Low level function to handle lists
 add_client(C,ClientList) -> [new_client(C)|ClientList].
 
-new_client(C) -> {C, nil, [],[]}.
+new_client(C) -> {C, nil, sets:new(),[]}.
 
 % remove anything from empty list returns empty list
 remove_client(_,[]) -> [];
