@@ -41,11 +41,11 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
 	    MM ! {ok, self()},
 	    io:format("New client has joined the server:~p.~n", [Client]),
 	    StorePid ! {print, self()},
-	    server_loop(add_client(Client,ClientList), StorePid, TrnCnt);
+	    server_loop(add_client(Client,ClientList), StorePid, TrnCnt, TrnHist, Checking);
 	{close, Client} -> 
 	    io:format("Client ~p has left the server.~n", [Client]),
 	    StorePid ! {print, self()},
-	    server_loop(remove_client(Client,ClientList), StorePid, TrnCnt);
+	    server_loop(remove_client(Client,ClientList), StorePid, TrnCnt, TrnHist, Checking);
 	{request, Client} -> 
 	    Client ! {proceed, self()},
         io:format("request from ~p, starting new transaction.~n", [Client]),
@@ -55,13 +55,14 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
 	    server_loop(NewClientList, StorePid, NewTrnCnt, NewTrnHist, Checking);
 	{confirm, Client} -> 
         io:format("confirm from ~p~n", [Client]),
-        CheckingPid = spawn(do_commit_loop, [TS, DEP, TrnHist, self()]),
+        [_, TS, DEP, _] = find_client(Client, ClientList),
+        CheckingPid = spawn(fun() -> do_commit_loop(TS, DEP, TrnHist, self()) end),
         NewChecking = [CheckingPid|Checking],
 	    server_loop(ClientList, StorePid, TrnCnt, TrnHist, NewChecking);
 	{action, Client, Act} ->
 	    io:format("Received ~p from client ~p.~n", [Act, Client]),
         handle_action(Act, Client),
-	    server_loop(ClientList, StorePid, TrnCnt);
+	    server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking);
     {abort, TS, ChkPid} ->
         %set status in history to aborted
         NewTrnHist = lists:keyreplace(TS, 1, TrnHist, {TS, aborted}),
@@ -70,10 +71,10 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
         Client = lists:keyfind(TS, 2, ClientList),
 	    Client ! {abort, self()},
         % send all Checking transactions a "someone_completed" with updated transaction history
-        map(fun(CheckingPid) -> CheckingPid ! someone_committed end, Checking),
+        lists:map(fun(CheckingPid) -> CheckingPid ! someone_committed end, Checking),
         % transaction has ended
         NewClientList = end_transaction(ClientList, Client),
-        server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
+        server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking);
     {commit, TS, ChkPid} ->
         % set status in history to committed
         NewTrnHist = lists:keyreplace(TS, 1, TrnHist, {TS, committed}),
@@ -82,14 +83,14 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
         Client = lists:keyfind(TS, 2, ClientList),
 	    Client ! {committed, self()},
         % send all Checking transactions a "someone_completed" with updated transaction history
-        map(fun(CheckingPid) -> CheckingPid ! someone_committed end, Checking),
+        lists:map(fun(CheckingPid) -> CheckingPid ! someone_committed end, Checking),
         % transaction has ended
         NewClientList = end_transaction(ClientList, Client),
         server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
     after 50000 ->
 	case all_gone(ClientList) of
 	    true -> exit(normal);    
-	    false -> server_loop(ClientList, StorePid, TrnCnt)
+	    false -> server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking)
 	end
     end.
 
@@ -106,18 +107,24 @@ store_loop(ServerPid, Database) ->
 % Wait for a 'someone_completed' from server_loop each 
 % time a running transaction is encountered in DEP.
 % restart loop with up-to-date history upon 'someone_completed'
-do_commit_loop(TS, DEP, TransactionHistory, ServerPid) ->
-    CommitCheck = check_history(DEP, TransactionHistory),
+do_commit_loop(TS, DEP, TrnHist, ServerPid) ->    
+    io:format("checking: DEP=~p   TrnHist=~p~n", [DEP, TrnHist]),
+    CommitCheck = check_history(DEP, TrnHist),
+    io:format("here~n"),
     case CommitCheck of
         wait ->
+            io:format("checking: wait~n"),
             receive 
-            {someone_completed, NewTransactionHistory} ->
-                do_commit_loop(TS, DEP, NewTransactionHistory)
-            end
+            {someone_completed, NewTrnHist} ->
+                do_commit_loop(TS, DEP, NewTrnHist, ServerPid)
+            end;
         abort ->
-            ServerPid ! {abort, TS, self()}
+            io:format("checking: abort~n"),
+            ServerPid ! {abort, TS, self()};
         commit ->
-            ServerPid ! {can_abort, Ts, self()}
+            io:format("checking: commit~n"),
+            ServerPid ! {commit, TS, self()}
+    end.
 
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -135,16 +142,10 @@ check_history(History, [TS|Rest]) ->
             check_history(History, Rest)
     end.
 
-handle_action({read, Idx}, Client) ->
-    io:format("Must read idx ~p~n", [Idx]);
-    WTS = 
-    TS = 
-    if WTS > TS
-        abort
-    else
-        do 
 handle_action({write, Idx, Val}, Client) ->
-    io:format("Must write val ~p to idx ~p~n", [Val, Idx]).
+    io:format("Must write val ~p to idx ~p for client ~p~n", [Val, Idx, Client]);
+handle_action({read, Idx}, Client) ->
+    io:format("Must read idx ~p for client ~p~n", [Idx, Client]).
     
 
 % Return new client list where the client tuple has been replaced with
