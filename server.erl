@@ -73,13 +73,15 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
                 NewClientList = add_to_Old(ClientList, TS, OldObject);
             {abort, TS} ->
                 io:format("Server: DB said abort trn ~p~n", [TS]),
-                {NewClientList, NewTrnHist, NewChecking} = abort(TS, -1, ClientList, StorePid, TrnHist,Checking),
+                {NewClientList, NewTrnHist, NewChecking} = 
+                    abort(TS, -1, ClientList, StorePid, TrnHist,Checking, self()),
                 server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
         end,
 	    server_loop(NewClientList, StorePid, TrnCnt, TrnHist, Checking);
     {abort, TS, ChkPid} ->
         io:format("Server: check said ABORT~n"),
-        {NewClientList, NewTrnHist, NewChecking} = abort(TS, ChkPid, ClientList, StorePid, TrnHist,Checking),
+        {NewClientList, NewTrnHist, NewChecking} = 
+            abort(TS, ChkPid, ClientList, StorePid, TrnHist,Checking, self()),
         server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking);
     {commit, TS, ChkPid} ->
         % set status in history to committed
@@ -167,9 +169,9 @@ check_commit_loop(TS, DEP, TrnHist, ServerPid) ->
 
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-abort(TS, ChkPid, ClientList, StorePid, TrnHist, Checking)  ->
+abort(TS, ChkPid, ClientList, StorePid, TrnHist, Checking, ServerPid)  ->
     {Client, _, _, OLD} = lists:keyfind(TS, 2, ClientList),
-    NewClientList = rollback(ClientList, OLD, StorePid),
+    StorePid ! {rollback, TS, OLD, ServerPid},
     %set status in history to aborted
     NewTrnHist      = lists:keyreplace(TS, 1, TrnHist, {TS, aborted}),
     NewChecking     = Checking--[ChkPid],
