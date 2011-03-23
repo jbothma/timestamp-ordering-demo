@@ -73,23 +73,13 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
                 NewClientList = add_to_Old(ClientList, TS, OldObject);
             {abort, TS} ->
                 io:format("Server: DB said abort trn ~p~n", [TS]),
-                NewClientList = ClientList
+                {NewClientList, NewTrnHist, NewChecking} = abort(TS, -1, ClientList, StorePid, TrnHist,Checking),
+                server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
         end,
 	    server_loop(NewClientList, StorePid, TrnCnt, TrnHist, Checking);
     {abort, TS, ChkPid} ->
         io:format("Server: check said ABORT~n"),
-
-        {Client, _, _, OLD} = lists:keyfind(TS, 2, ClientList),
-
-        NewClientList = rollback(ClientList, OLD, StorePid),
-
-
-        %set status in history to aborted
-        NewTrnHist      = lists:keyreplace(TS, 1, TrnHist, {TS, aborted}),
-        NewChecking     = Checking--[ChkPid],
-        NewClientList   = end_transaction(ClientList, Client),
-	    Client ! {abort, self()},
-        announce_completion(Checking),
+        {NewClientList, NewTrnHist, NewChecking} = abort(TS, ChkPid, ClientList, StorePid, TrnHist,Checking),
         server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking);
     {commit, TS, ChkPid} ->
         % set status in history to committed
@@ -176,6 +166,19 @@ check_commit_loop(TS, DEP, TrnHist, ServerPid) ->
     end.
 
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+abort(TS, ChkPid, ClientList, StorePid, TrnHist, Checking)  ->
+    {Client, _, _, OLD} = lists:keyfind(TS, 2, ClientList),
+    NewClientList = rollback(ClientList, OLD, StorePid),
+    %set status in history to aborted
+    NewTrnHist      = lists:keyreplace(TS, 1, TrnHist, {TS, aborted}),
+    NewChecking     = Checking--[ChkPid],
+    NewClientList   = end_transaction(ClientList, Client),
+    Client ! {abort, self()},
+    announce_completion(Checking),
+    {NewClientList, NewTrnHist, NewChecking}.
+
+
 
 %        for each (oldO_j, oldWTS(O_j)) in OLD(T_i):     // make sure nothing persists from this aborting transaction:
 %            If WTS(Oj) equals TS(Ti):                   // if current value is what this transaction wrote to it
