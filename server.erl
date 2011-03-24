@@ -47,12 +47,20 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
 		StorePid ! {print, self()},
 		server_loop(remove_client(Client,ClientList), StorePid, TrnCnt, TrnHist, Checking);
 	{request, Client} -> 
-		Client ! {proceed, self()},
-		io:format("request from ~p, starting new transaction.~n", [Client]),
-		{NewTrnCnt, NewClientList} = start_transaction(TrnCnt, ClientList, Client),
-		NewTrnHist = [{NewTrnCnt, running}|TrnHist],
-		io:format("New transaction count stands at ~p~n", [NewTrnCnt]),
-		server_loop(NewClientList, StorePid, NewTrnCnt, NewTrnHist, Checking);
+		TS = get_transaction(ClientList, Client),
+		if
+			is_integer(TS) ->
+				%TODO this is a hack to wait until previous transaction finished
+				self() ! {request, Client}, %re-queue request :D 
+				server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking);
+			true ->
+				Client ! {proceed, self()},
+				io:format("request from ~p, starting new transaction.~n", [Client]),
+				{NewTrnCnt, NewClientList} = start_transaction(TrnCnt, ClientList, Client),
+				NewTrnHist = [{NewTrnCnt, running}|TrnHist],
+				io:format("New transaction count stands at ~p~n", [NewTrnCnt]),
+				server_loop(NewClientList, StorePid, NewTrnCnt, NewTrnHist, Checking)
+		end;
 	{confirm, Client} -> 
 		ServerPid = self(),
 		io:format("confirm from ~p~n", [Client]),
