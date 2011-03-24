@@ -57,27 +57,39 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
 		ServerPid = self(),
 		io:format("confirm from ~p~n", [Client]),
 		{_, TS, DEP, _} = lists:keyfind(Client, 1, ClientList),
-		CheckingPid = spawn(fun() -> check_commit_loop(TS, DEP, TrnHist, ServerPid) end),
-		NewChecking = [CheckingPid|Checking],
-		server_loop(ClientList, StorePid, TrnCnt, TrnHist, NewChecking);
+		if
+			is_integer(TS) ->
+				CheckingPid = spawn(fun() -> check_commit_loop(TS, DEP, TrnHist, ServerPid) end),
+				NewChecking = [CheckingPid|Checking],
+				server_loop(ClientList, StorePid, TrnCnt, TrnHist, NewChecking);
+			true -> %TS isn't an int, it's probably nil which means no transaction for this client.
+				io:format("Server: Client ~p sent confirm but has no transaction open.~n", [Client]),
+				server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking)
+		end;
 	{action, Client, Act} ->
 		%io:format("Received ~p from client ~p.~n", [Act, Client]),
 		TS = get_transaction(ClientList, Client),
-		StorePid ! {Act, TS, self()},
-		receive
-			{read_ok, Idx, Val, WTS} ->  % do DEP(T_i).add(WTS(O_j))
-				io:format("Server: Trn ~p read ~p allowed: ~p.~n", [TS, Idx, Val]),
-				NewClientList = add_to_DEP(ClientList, TS, WTS);
-			{write_ok, Idx, OldObject} ->  % Let server do OLD(T_i).add( O_j, WTS(O_j) )				
-				io:format("Server: Trn ~p write ~p allowed.~n", [TS, Idx]),
-				NewClientList = add_to_Old(ClientList, TS, OldObject);
-			{abort, TS, Reason} ->
-				io:format("Server: DB said abort trn ~p. Reason: ~p.~n", [TS, Reason]),
-				{NewClientList, NewTrnHist, NewChecking} = 
-					abort(TS, -1, ClientList, StorePid, TrnHist,Checking, self()),
-				server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
-		end,
-		server_loop(NewClientList, StorePid, TrnCnt, TrnHist, Checking);
+		if
+			is_integer(TS) ->
+				StorePid ! {Act, TS, self()},
+				receive
+					{read_ok, Idx, Val, WTS} ->  % do DEP(T_i).add(WTS(O_j))
+						io:format("Server: Trn ~p read ~p allowed: ~p.~n", [TS, Idx, Val]),
+						NewClientList = add_to_DEP(ClientList, TS, WTS);
+					{write_ok, Idx, OldObject} ->  % Let server do OLD(T_i).add( O_j, WTS(O_j) )				
+						io:format("Server: Trn ~p write ~p allowed.~n", [TS, Idx]),
+						NewClientList = add_to_Old(ClientList, TS, OldObject);
+					{abort, TS, Reason} ->
+						io:format("Server: DB said abort trn ~p. Reason: ~p.~n", [TS, Reason]),
+						{NewClientList, NewTrnHist, NewChecking} = 
+							abort(TS, -1, ClientList, StorePid, TrnHist,Checking, self()),
+						server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
+				end,
+				server_loop(NewClientList, StorePid, TrnCnt, TrnHist, Checking);
+			true -> %TS isn't an int, it's probably nil which means no transaction for this client.
+				io:format("Server: Client ~p sent action ~p but has no transaction open.~n", [Client, Act]),
+				server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking)
+		end;
 	{abort, TS, Reason, ChkPid} ->
 		io:format("Server: check trn ~p said ABORT. Reason: ~p.~n", [TS,Reason]),
 		{NewClientList, NewTrnHist, NewChecking} = 
@@ -272,11 +284,7 @@ end_transaction(ClientList, Client) ->
 	lists:keyreplace(Client, 1, ClientList, {Client, nil, sets:new(), []}).
 
 get_transaction(ClientList, Client) -> 
-	TS = element(2, lists:keyfind(Client, 1, ClientList)),
-	case TS of
-		TS when is_integer(TS)  -> TS;
-		_Else				   -> io:format("no TS for client ~p in ~p~n", [Client,ClientList])
-	end.
+	element(2, lists:keyfind(Client, 1, ClientList)).
 
 %% - Low level function to handle lists
 add_client(C,ClientList) -> [new_client(C)|ClientList].
