@@ -65,21 +65,21 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
         TS = get_transaction(ClientList, Client),
         StorePid ! {Act, TS, self()},
         receive
-            {depend, WTS} ->  % do DEP(T_i).add(WTS(O_j))
-                io:format("Server: Read allowed~n"),
+            {read_ok, Idx, Val, WTS} ->  % do DEP(T_i).add(WTS(O_j))
+                io:format("Server: Trn ~p read ~p allowed: ~p.~n", [TS, Idx, Val]),
                 NewClientList = add_to_DEP(ClientList, TS, WTS);
-            {old, OldObject} ->  % Let server do OLD(T_i).add( O_j, WTS(O_j) )                
-                io:format("Server: Write allowed~n"),
+            {write_ok, Idx, OldObject} ->  % Let server do OLD(T_i).add( O_j, WTS(O_j) )                
+                io:format("Server: Trn ~p write ~p allowed.~n", [TS, Idx]),
                 NewClientList = add_to_Old(ClientList, TS, OldObject);
-            {abort, TS} ->
-                io:format("Server: DB said abort trn ~p~n", [TS]),
+            {abort, TS, Reason} ->
+                io:format("Server: DB said abort trn ~p. Reason: ~p.~n", [TS, Reason]),
                 {NewClientList, NewTrnHist, NewChecking} = 
                     abort(TS, -1, ClientList, StorePid, TrnHist,Checking, self()),
                 server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
         end,
 	    server_loop(NewClientList, StorePid, TrnCnt, TrnHist, Checking);
-    {abort, TS, ChkPid} ->
-        io:format("Server: check said ABORT~n"),
+    {abort, TS, Reason, ChkPid} ->
+        io:format("Server: check trn ~p said ABORT. Reason: ~p.~n", [TS,Reason]),
         {NewClientList, NewTrnHist, NewChecking} = 
             abort(TS, ChkPid, ClientList, StorePid, TrnHist,Checking, self()),
         server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking);
@@ -110,28 +110,33 @@ store_loop(ServerPid, Database) ->
         WTS = get_WTS(Database, Idx),
         RTS = get_RTS(Database, Idx),
         if
+			%http://en.wikipedia.org/wiki/Talk:Timestamp-based_concurrency_control#Thomas_Write_Rule
             (WTS > TS) or (RTS > TS) ->
-                ServerPid ! {abort, TS},
+				Reason = "WTS " ++ integer_to_list(WTS) ++  " > TS " ++ integer_to_list(TS) ++
+					" or RTS " ++ integer_to_list(RTS) ++ " > TS " ++ integer_to_list(TS),
+                ServerPid ! {abort, TS, Reason},
                 NewDatabase = Database;
             true ->
                 OldObject = lists:keyfind(Idx, 1, Database),
-                ServerPid ! {old, OldObject},  % Let server do OLD(T_i).add( O_j, WTS(O_j) )
                 %set WTS(O_j) = TS(T_i)
                 %do write
-                NewDatabase = do_write(Database, Idx, Val, TS)
+                NewDatabase = do_write(Database, Idx, Val, TS),
+                ServerPid ! {write_ok, Idx, OldObject}  % Let server do OLD(T_i).add( O_j, WTS(O_j) )
         end,
 	    io:format("Database status:~n~p.~n",[NewDatabase]),
 	    store_loop(ServerPid,NewDatabase);
     {{read, Idx}, TS, ServerPid} ->
         io:format("DB: Must read idx ~p for trn ~p~n", [Idx, TS]),
-        WTS = get_WTS(Database, Idx),
+%        WTS = get_WTS(Database, Idx),
+		{_, Val, RTS, WTS} = lists:keyfind(Idx, 1, Database),
         if
             WTS > TS ->
-                ServerPid ! {abort, TS},
+				Reason = "WTS" ++ integer_to_list(WTS) ++ "TS" ++ integer_to_list(TS),
+                ServerPid ! {abort, TS, Reason},
                 NewDatabase = Database;
             true ->                 
-                ServerPid ! {depend, WTS},     % Let server do DEP(T_i).add(WTS(O_j))
-                RTS = get_RTS(Database, Idx),
+                ServerPid ! {read_ok, Idx, Val, WTS},     % Let server do DEP(T_i).add(WTS(O_j))
+%                RTS = get_RTS(Database, Idx),
                 NewDatabase = set_RTS(Database, Idx, erlang:max(RTS, TS))
         end,
 	    io:format("Database status:~n~p.~n",[NewDatabase]),
@@ -139,7 +144,7 @@ store_loop(ServerPid, Database) ->
     {rollback, TS, OLD, ServerPid} ->
         io:format("DB: rolling back OLD=~p~n", [OLD]),
         NewDatabase = rollback(Database, TS, OLD),
-        ServerPid ! rollback_complete,  % server blocks until this is done but not sure it's necesary TODO
+        ServerPid ! rollback_complete,  % TODO server blocks until this is done but not sure it's necesary
 	    io:format("Database status:~n~p.~n",[NewDatabase]),
         store_loop(ServerPid, NewDatabase)
     end.
@@ -153,15 +158,15 @@ check_commit_loop(TS, DEP, TrnHist, ServerPid) ->
     %io:format("checking trn ~p: DEP=~p   TrnHist=~p~n", [TS, sets:to_list(DEP), TrnHist]),
     CommitCheck = check_history(TS, TrnHist, sets:to_list(DEP)),
     case CommitCheck of
-        wait ->
-            io:format("checking: wait~n"),
+        {wait, Reason} ->
+            io:format("checking: wait...~p.~n", [Reason]),
             receive 
             {someone_completed, NewTrnHist} ->
                 check_commit_loop(TS, DEP, NewTrnHist, ServerPid)
             end;
-        abort ->
+        {abort, Reason} ->
             %io:format("checking: abort~n"),
-            ServerPid ! {abort, TS, self()};
+            ServerPid ! {abort, TS, Reason, self()};
         commit ->
             %io:format("checking: commit~n"),
             ServerPid ! {commit, TS, self()}
@@ -242,9 +247,9 @@ check_history(Committer, History, [TS|Rest]) ->
     {_, Status} = lists:keyfind(TS, 1, History),
     case Status of 
         aborted ->
-            abort;
+            {abort, integer_to_list(TS) ++ " aborted"};
         running ->
-            wait;
+            {wait, integer_to_list(TS) ++ " is running"};
         committed ->
             check_history(Committer, History, Rest)
     end.
