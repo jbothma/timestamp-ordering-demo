@@ -1,7 +1,7 @@
 .SUFFIXES: .erl .beam
 
 .erl.beam:
-	erlc +debug_info -W $<
+	erlc -W $<
 
 MODS = client parser window server
 

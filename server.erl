@@ -39,6 +39,7 @@ initialize() ->
 %% the values of the global variable a, b, c and d 
 %% TrnCnt is Transaction Count, incremented in start_transaction
 server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
+    %io:format("ClientList=~p~n", [ClientList]),
     receive
     {login, MM, Client} ->  % client joining server
         MM ! {ok, self()},
@@ -52,7 +53,9 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
         server_loop(remove_client(Client,ClientList), StorePid, TrnCnt, TrnHist, Checking);
 
     {request, Client} ->    % client initiating a transaction
+        %io:format("DEBUG: request from client ~p.~n", [Client]),
         TS = get_transaction(ClientList, Client),
+        %io:format("DEBUG: here~n"),
         if
             is_integer(TS) ->
                 % re-queue client's request if it already has a transaction open:   
@@ -75,7 +78,7 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
     {confirm, Client} ->    % client asking to complete a transaction
         ServerPid = self(),
         io:format("Server: confirm from client ~p.~n", [Client]),
-        {_, TS, DEP, _} = lists:keyfind(Client, 1, ClientList),
+        {_, TS, DEP, _} = keyfind(Client, 1, ClientList),
         if
             is_integer(TS) ->
                 CheckingPid = spawn(fun() -> check_commit_loop(TS, DEP, TrnHist, ServerPid) end),
@@ -87,6 +90,7 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
         end;
 
     {action, Client, Act} ->    % client sending one action in a transaction
+        %io:format("DEBUG: action from client ~p.~n", [Client]),
         TS = get_transaction(ClientList, Client),
         if
             is_integer(TS) ->
@@ -129,7 +133,7 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
         % notifications any more, so remove from Checking list.
         NewChecking     = Checking--[ChkPid],
 
-        Client          = element(1, lists:keyfind(TS, 2, ClientList)),
+        Client          = element(1, keyfind(TS, 2, ClientList)),
         NewClientList   = end_transaction(ClientList, Client),
 
         % inform client
@@ -166,7 +170,7 @@ store_loop(ServerPid, Database) ->
                 ServerPid ! {abort, TS, Reason},
                 NewDatabase = Database;
             true -> % else: write is allowed
-                OldObject = lists:keyfind(Idx, 1, Database),
+                OldObject = keyfind(Idx, 1, Database),
                 %do the write and set WTS(O_j) = TS(T_i)
                 NewDatabase = do_write(Database, Idx, Val, TS),
                 ServerPid ! {write_ok, Idx, OldObject}  % Let server do OLD(T_i).add( O_j, WTS(O_j) )
@@ -176,14 +180,14 @@ store_loop(ServerPid, Database) ->
 
     {{read, Idx}, TS, ServerPid} ->     % action from client matched as READ
         io:format("DB: Must read idx ~p for trn ~p~n", [Idx, TS]),
-        {_, Val, RTS, WTS} = lists:keyfind(Idx, 1, Database),
+        {_, Val, RTS, WTS} = keyfind(Idx, 1, Database),
         if
             WTS > TS ->
                 Reason = "WTS " ++ integer_to_list(WTS) ++ " > TS " ++ integer_to_list(TS),
                 ServerPid ! {abort, TS, Reason},
                 NewDatabase = Database;
             true ->      % else: read is allowed
-                NewDatabase = set_RTS(Database, Idx, erlang:max(RTS, TS)),
+                NewDatabase = set_RTS(Database, Idx, max(RTS, TS)),
                 ServerPid ! {read_ok, Idx, Val, WTS}     % Let server do DEP(T_i).add(WTS(O_j))
         end,
         io:format("DB status: ~p.~n",[NewDatabase]),
@@ -228,7 +232,7 @@ check_commit_loop(TS, DEP, TrnHist, ServerPid) ->
 
 
 abort(TS, ChkPid, ClientList, StorePid, TrnHist, Checking, ServerPid)  ->
-    {Client, _, _, OLD} = lists:keyfind(TS, 2, ClientList),
+    {Client, _, _, OLD} = keyfind(TS, 2, ClientList),
     StorePid ! {rollback, TS, OLD, ServerPid},
 
     % set status in history to aborted
@@ -267,24 +271,24 @@ rollback(Database, TS, [ {Idx,OldVal,_,OldWTS} |RestOLD]) ->
 
 
 get_WTS(DB, Idx) ->
-    element(4, lists:keyfind(Idx, 1, DB)).
+    element(4, keyfind(Idx, 1, DB)).
 
 get_RTS(DB, Idx) ->
-    element(3, lists:keyfind(Idx, 1, DB)).
+    element(3, keyfind(Idx, 1, DB)).
 
 set_RTS(DB, Idx, NewRTS) ->
-    {_, Val, _, WTS} = lists:keyfind(Idx, 1, DB),
+    {_, Val, _, WTS} = keyfind(Idx, 1, DB),
     lists:keyreplace(Idx, 1, DB, {Idx, Val, NewRTS, WTS}).
 
 add_to_DEP(ClientList, TS, DependOnTS) ->
-    {Client, _, DEP, OLD} = lists:keyfind(TS, 2, ClientList),
+    {Client, _, DEP, OLD} = keyfind(TS, 2, ClientList),
     lists:keyreplace(TS, 2, ClientList, {Client, TS, sets:add_element(DependOnTS, DEP), OLD}).
 
 
 % add OldObject to OLD list if there isn't an earlier copy already
 add_to_OLD(ClientList, TS, OldObject) ->
-    {Client, _, DEP, OLD} = lists:keyfind(TS, 2, ClientList),
-    case lists:keyfind(element(1,OldObject), 1, OLD) of
+    {Client, _, DEP, OLD} = keyfind(TS, 2, ClientList),
+    case keyfind(element(1,OldObject), 1, OLD) of
         false ->
             lists:keyreplace(TS, 2, ClientList, {Client, TS, DEP, [OldObject|OLD]});
         _Other ->
@@ -307,7 +311,7 @@ check_history(_, _, []) -> commit;
 check_history(Committer, History, [Committer|Rest]) -> 
     check_history(Committer, History, Rest);  % skip self
 check_history(Committer, History, [TS|Rest]) ->
-    {_, Status} = lists:keyfind(TS, 1, History),
+    {_, Status} = keyfind(TS, 1, History),
     case Status of 
         aborted ->
             {abort, integer_to_list(TS) ++ " aborted"};
@@ -321,15 +325,34 @@ check_history(Committer, History, [TS|Rest]) ->
 % new transaction count and client list with client's transaction timestamp/ID updated
 start_transaction(TrnCnt, ClientList, Client) ->
     NewTrnCnt           = TrnCnt + 1,
-    {_, _, DEP, OLD}    = lists:keyfind(Client, 1, ClientList),
+    %io:format("DEBUG: start_transaction Client=~p~n ClientList=~p~n", [Client,ClientList]),
+    Bob = keyfind(Client, 1, ClientList),
+    %io:format("DEBUG: ~p~n", [Bob]),
+    {_, _, DEP, OLD} = Bob,
     {NewTrnCnt, lists:keyreplace(Client, 1, ClientList, {Client, NewTrnCnt, DEP, OLD})}.
 
 end_transaction(ClientList, Client) ->
     lists:keyreplace(Client, 1, ClientList, {Client, nil, sets:new(), []}).
 
 get_transaction(ClientList, Client) -> 
-    element(2, lists:keyfind(Client, 1, ClientList)).
+    %io:format("DEBUG: get_transaction Client=~p~n ClientList=~p~n", [Client,ClientList]),
+    Bob = keyfind(Client, 1, ClientList),
+    %io:format("DEBUG: ~p~n", [Bob]),
+    TS = element(2,Bob),
+    %io:format("DEBUG: get_transaction Client=~p TS=~p~n", [Client, TS]),
+    TS.
 
+keyfind(Key, N, TupleList) ->
+    case lists:keysearch(Key, N, TupleList) of
+        false -> false;
+        {value, Tuple} -> Tuple
+    end.
+
+max(L,R) ->
+    case L < R of
+        true -> R;
+        false -> L
+    end.
 
 new_client(C) -> {C, nil, sets:new(),[]}.
 
