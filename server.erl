@@ -78,7 +78,7 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
     {confirm, Client} ->    % client asking to complete a transaction
         ServerPid = self(),
         io:format("Server: confirm from client ~p.~n", [Client]),
-        {_, TS, DEP, _} = keyfind(Client, 1, ClientList),
+        {_, TS, DEP, _, _} = keyfind(Client, 1, ClientList),
         if
             is_integer(TS) ->
                 CheckingPid = spawn(fun() -> check_commit_loop(TS, DEP, TrnHist, ServerPid) end),
@@ -89,32 +89,44 @@ server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking) ->
                 server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking)
         end;
 
-    {action, Client, Act} ->    % client sending one action in a transaction
-        %io:format("DEBUG: action from client ~p.~n", [Client]),
-        TS = get_transaction(ClientList, Client),
+    {action, Client, Act, CCount} ->    % client sending one action in a transaction
+        %sleep(1), %uncomment this sleep line to fake server delay and induce duplicates to demo ignoring dupes.
+        SCount = get_SCount(ClientList, Client),
         if
-            is_integer(TS) ->
-                StorePid ! {Act, TS, self()},
-                receive % block until DB responds with <op>_ok or abort
+        CCount < SCount ->
+           io:format("Server: Ignoring ~p from client~p with CCount ~p < SCount ~p.~n", [Act, Client, CCount, SCount]),      
+           server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking);
+        true ->
+            Client ! received, % always tell client an action is received, even if it's ignored later because there's no TS
+            io:format("Server: Received ~p from client~p with CCount ~p and SSeqNum ~p.~n", [Act, Client, CCount, SCount]),
+            %io:format("DEBUG: action from client ~p.~n", [Client]),
+            TS = get_transaction(ClientList, Client),
+            if
+                is_integer(TS) ->
+                    NewClientList_a = set_SCount(ClientList, Client, SCount+1),
+                    StorePid ! {Act, TS, self()},
 
-                {read_ok, Idx, Val, WTS} ->  % do DEP(T_i).add(WTS(O_j))
-                    io:format("Server: Trn ~p read ~p allowed: ~p.~n", [TS, Idx, Val]),
-                    NewClientList = add_to_DEP(ClientList, TS, WTS);
+                    receive % block until DB responds with <op>_ok or abort
 
-                {write_ok, Idx, OldObject} ->  % Let server do OLD(T_i).add( O_j, WTS(O_j) )                
-                    io:format("Server: Trn ~p write ~p allowed.~n", [TS, Idx]),
-                    NewClientList = add_to_OLD(ClientList, TS, OldObject);
+                    {read_ok, Idx, Val, WTS} ->  % do DEP(T_i).add(WTS(O_j))
+                        io:format("Server: Trn ~p read ~p allowed: ~p.~n", [TS, Idx, Val]),
+                        NewClientList = add_to_DEP(NewClientList_a, TS, WTS);
 
-                {abort, TS, Reason} ->
-                    io:format("Server: DB said abort trn ~p. Reason: ~p.~n", [TS, Reason]),
-                    {NewClientList, NewTrnHist, NewChecking} = 
-                        abort(TS, -1, ClientList, StorePid, TrnHist,Checking, self()),
-                    server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
-                end,
-                server_loop(NewClientList, StorePid, TrnCnt, TrnHist, Checking);
-            true -> %TS isn't an int, it's probably nil which means no transaction for this client.
-                io:format("Server: Client ~p sent action ~p but has no transaction open.~n", [Client, Act]),
-                server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking)
+                    {write_ok, Idx, OldObject} ->  % Let server do OLD(T_i).add( O_j, WTS(O_j) )                
+                        io:format("Server: Trn ~p write ~p allowed.~n", [TS, Idx]),
+                        NewClientList = add_to_OLD(NewClientList_a, TS, OldObject);
+
+                    {abort, TS, Reason} ->
+                        io:format("Server: DB said abort trn ~p. Reason: ~p.~n", [TS, Reason]),
+                        {NewClientList, NewTrnHist, NewChecking} = 
+                            abort(TS, -1, NewClientList_a, StorePid, TrnHist,Checking, self()),
+                        server_loop(NewClientList, StorePid, TrnCnt, NewTrnHist, NewChecking)
+                    end,
+                    server_loop(NewClientList, StorePid, TrnCnt, TrnHist, Checking);
+                true -> %TS isn't an int, it's probably nil which means no transaction for this client.
+                    io:format("Server: Client ~p sent action ~p but has no transaction open.~n", [Client, Act]),
+                    server_loop(ClientList, StorePid, TrnCnt, TrnHist, Checking)
+            end
         end;
 
     {abort, TS, Reason, ChkPid} ->  % comfirm check process rejecting transaction
@@ -232,7 +244,7 @@ check_commit_loop(TS, DEP, TrnHist, ServerPid) ->
 
 
 abort(TS, ChkPid, ClientList, StorePid, TrnHist, Checking, ServerPid)  ->
-    {Client, _, _, OLD} = keyfind(TS, 2, ClientList),
+    {Client, _, _, OLD, _} = keyfind(TS, 2, ClientList),
     StorePid ! {rollback, TS, OLD, ServerPid},
 
     % set status in history to aborted
@@ -281,16 +293,16 @@ set_RTS(DB, Idx, NewRTS) ->
     lists:keyreplace(Idx, 1, DB, {Idx, Val, NewRTS, WTS}).
 
 add_to_DEP(ClientList, TS, DependOnTS) ->
-    {Client, _, DEP, OLD} = keyfind(TS, 2, ClientList),
-    lists:keyreplace(TS, 2, ClientList, {Client, TS, sets:add_element(DependOnTS, DEP), OLD}).
+    {Client, _, DEP, OLD, SCount} = keyfind(TS, 2, ClientList),
+    lists:keyreplace(TS, 2, ClientList, {Client, TS, sets:add_element(DependOnTS, DEP), OLD, SCount}).
 
 
 % add OldObject to OLD list if there isn't an earlier copy already
 add_to_OLD(ClientList, TS, OldObject) ->
-    {Client, _, DEP, OLD} = keyfind(TS, 2, ClientList),
+    {Client, _, DEP, OLD, SCount} = keyfind(TS, 2, ClientList),
     case keyfind(element(1,OldObject), 1, OLD) of
         false ->
-            lists:keyreplace(TS, 2, ClientList, {Client, TS, DEP, [OldObject|OLD]});
+            lists:keyreplace(TS, 2, ClientList, {Client, TS, DEP, [OldObject|OLD], SCount});
         _Other ->
             ClientList
     end.
@@ -325,22 +337,14 @@ check_history(Committer, History, [TS|Rest]) ->
 % new transaction count and client list with client's transaction timestamp/ID updated
 start_transaction(TrnCnt, ClientList, Client) ->
     NewTrnCnt           = TrnCnt + 1,
-    %io:format("DEBUG: start_transaction Client=~p~n ClientList=~p~n", [Client,ClientList]),
-    Bob = keyfind(Client, 1, ClientList),
-    %io:format("DEBUG: ~p~n", [Bob]),
-    {_, _, DEP, OLD} = Bob,
-    {NewTrnCnt, lists:keyreplace(Client, 1, ClientList, {Client, NewTrnCnt, DEP, OLD})}.
+    {_, _, DEP, OLD, _} = keyfind(Client, 1, ClientList),
+    {NewTrnCnt, lists:keyreplace(Client, 1, ClientList, {Client, NewTrnCnt, DEP, OLD, 0})}.
 
 end_transaction(ClientList, Client) ->
-    lists:keyreplace(Client, 1, ClientList, {Client, nil, sets:new(), []}).
+    lists:keyreplace(Client, 1, ClientList, {Client, nil, sets:new(), [], 0}).
 
 get_transaction(ClientList, Client) -> 
-    %io:format("DEBUG: get_transaction Client=~p~n ClientList=~p~n", [Client,ClientList]),
-    Bob = keyfind(Client, 1, ClientList),
-    %io:format("DEBUG: ~p~n", [Bob]),
-    TS = element(2,Bob),
-    %io:format("DEBUG: get_transaction Client=~p TS=~p~n", [Client, TS]),
-    TS.
+    element(2,keyfind(Client, 1, ClientList)).
 
 keyfind(Key, N, TupleList) ->
     case lists:keysearch(Key, N, TupleList) of
@@ -354,16 +358,35 @@ max(L,R) ->
         false -> L
     end.
 
-new_client(C) -> {C, nil, sets:new(),[]}.
+% A Client tuple:
+%  - Pid
+%  - TS
+%  - DEP
+%  - OLD
+%  - SCount   - Server Sequence Number
+new_client(C) -> {C, nil, sets:new(), [], 0}.
 
 %% - Low level function to handle lists
 add_client(C,ClientList) -> [new_client(C)|ClientList].
 
 % remove anything from empty list returns empty list
 remove_client(_,[]) -> [];
-remove_client(C, [ {C,_,_,_} | T ]) -> T;
+remove_client(C, [ {C,_,_,_,_} | T ]) -> T;
 remove_client(C, [H|T]) -> [H|remove_client(C,T)].
+
+get_SCount(ClientList, Client) ->
+    element(5, keyfind(Client, 1, ClientList)).
+
+set_SCount(ClientList, Client, SCount) ->
+    {_, TS, DEP, OLD, _} = keyfind(Client, 1, ClientList),
+    lists:keyreplace(TS, 2, ClientList, {Client, TS, DEP, OLD, SCount}).
 
 
 all_gone([]) -> true;
 all_gone(_) -> false.
+
+sleep(Latency) ->
+    receive
+    after 1000*random:uniform(Latency) ->
+	  true
+    end.

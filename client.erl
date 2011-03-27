@@ -14,7 +14,6 @@
 
 start(Host) ->
     spawn(fun() -> handler(Host) end).
-
 start_local() ->
     spawn(fun() -> handler('server@localhost') end).
 
@@ -83,14 +82,14 @@ connected(Window, ServerPid) ->
 process(Window, ServerPid, Transaction) ->
     ServerPid ! {request, self()}, %% Send a request to server and wait for proceed message
     receive
-	{proceed, ServerPid} -> send(Window, ServerPid, Transaction); %% received green light send the transaction.
+	{proceed, ServerPid} -> send(Window, ServerPid, Transaction, 0); %% received green light send the transaction.
 	{close, ServerPid} -> exit(serverDied);
 	Other ->
 	    io:format("client active unexpected: ~p~n",[Other])
     end.
 
 %% - Sending the transaction and waiting for confirmation
-send(Window, ServerPid, []) ->
+send(Window, ServerPid, [], _) ->
     ServerPid ! {confirm, self()}, %% Once all the list (transaction) items sent, send confirmation
     receive
 	{abort, ServerPid} -> insert_str(Window, "Aborted... type run if you want to try again!\n"),
@@ -103,14 +102,27 @@ send(Window, ServerPid, []) ->
 	Other ->
 	    io:format("client active unexpected: ~p~n",[Other])
     end;
-send(Window, ServerPid, [H|T]) -> 
+send(Window, ServerPid, [H|T], SeqNum) -> 
     sleep(3), 
-    case loose(0) of
+    case loose(5) of
 	%% In order to handle losses, think about adding an extra field to the message sent
-	false -> ServerPid ! {action, self(), H}; 
-        true -> ok
+	false ->
+        io:format("Sending ~p with SeqNum ~p.~n", [H, SeqNum]),
+        ServerPid ! {action, self(), H, SeqNum};
+    true ->         
+        io:format("Sending (losing) ~p with SeqNum ~p.~n", [H, SeqNum]),
+        ok
     end,
-    send(Window, ServerPid, T).
+    receive
+    received ->
+        io:format("    ...received.~n"),
+        send(Window, ServerPid, T, SeqNum+1)
+    after 500->  % how long to wait before resending. 
+        % Make delay small e.g. 200 and add a delay to server responding with "received" to see
+        % the server ignoring lots of duplicates
+        io:format("    ...delivery acknowledgement timed out.~n"),
+        send(Window, ServerPid, [H|T], SeqNum)
+    end.
 %%%%%%%%%%%%%%%%%%%%%%% Active Window %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
